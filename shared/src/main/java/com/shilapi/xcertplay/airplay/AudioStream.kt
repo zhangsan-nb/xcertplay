@@ -190,7 +190,7 @@ class AudioStream(
 
 /** Maps the phone's negotiated audioFormat bits to a decode/render format. */
 object AudioStreamCodec {
-    /** CarPlay clocks microphone Opus RTP at the selected input rate, not 48 kHz. */
+    /** Opus input uses the selected rate; its RTP timestamp clock remains 48 kHz. */
     fun opusCaptureRate(bits: Long): Int = when {
         bits and 0x40000000L != 0L -> 48_000
         bits and 0x20000000L != 0L -> 24_000

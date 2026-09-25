@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay.media
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat as AndroidAudioFormat
 import android.media.AudioTrack
@@ -26,6 +27,7 @@ import java.util.concurrent.LinkedBlockingQueue
  * played through AudioTrack. Call [close] when the session tears down.
  */
 class AndroidMediaSink(
+    private val context: Context,
     surface: Surface? = null,
     private val videoWidth: Int = 1280,
     private val videoHeight: Int = 720,
@@ -84,7 +86,7 @@ class AndroidMediaSink(
     }
 
     override fun onMicrophoneStarted(type: Int, config: MicrophoneConfig) {
-        val uplink = microphoneUplinks.computeIfAbsent(type) { MicrophoneUplink(config) }
+        val uplink = microphoneUplinks.computeIfAbsent(type) { MicrophoneUplink(context, config) }
         if (!uplink.start()) microphoneUplinks.remove(type, uplink)
     }
 

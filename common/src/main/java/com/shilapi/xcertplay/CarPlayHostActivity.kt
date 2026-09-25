@@ -2797,6 +2797,7 @@ class CarPlayHostActivity : ComponentActivity() {
         videoHeight: Int,
         controllerGeneration: Int,
     ): AndroidMediaSink = AndroidMediaSink(
+        context = applicationContext,
         surface = null,
         videoWidth = videoWidth,
         videoHeight = videoHeight,

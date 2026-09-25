@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
 import java.net.InetAddress
+import java.net.Inet4Address
 
 /** Everything one captured microphone stream needs to send samples to the phone. */
 data class MicrophoneConfig(
@@ -18,9 +19,15 @@ data class MicrophoneConfig(
     val samplesPerPacket: Int
         get() = maxOf(1, sampleRate * frameMillis / 1000)
 
+    val rtpSamplesPerPacket: Int
+        get() = if (codec == AudioCodecKind.OPUS) 48_000 * frameMillis / 1000 else samplesPerPacket
+
     val frameBytes: Int
         get() = samplesPerPacket * channels * 2
 }
+
+internal fun microphoneBindAddress(peer: InetAddress): InetAddress =
+    InetAddress.getByName(if (peer is Inet4Address) "0.0.0.0" else "::")
 
 /** Mutable RTP/ChaCha counters for one microphone uplink. */
 class MicrophoneCounters(
