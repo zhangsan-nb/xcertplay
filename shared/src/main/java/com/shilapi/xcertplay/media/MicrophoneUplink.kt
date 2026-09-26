@@ -1,9 +1,7 @@
 package com.shilapi.xcertplay.media
 
 import android.content.Context
-import android.media.AudioFormat as AndroidAudioFormat
 import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.util.Log
 import com.shilapi.xcertplay.airplay.AudioCodecKind
 import com.shilapi.xcertplay.airplay.MicrophoneConfig
@@ -26,7 +24,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal class MicrophoneUplink(
     private val context: Context,
     private val config: MicrophoneConfig,
+    microphoneGainPercent: Int,
 ) : Closeable {
+    private val microphoneGainPercent = MicrophoneGain.sanitize(microphoneGainPercent)
     private val running = AtomicBoolean(false)
     private val firstPacketLogged = AtomicBoolean(false)
     @Volatile private var audioModeLease: Closeable? = null
@@ -50,13 +50,6 @@ internal class MicrophoneUplink(
     private fun startCapture() {
         audioModeLease = MicrophoneAudioMode.acquire(context)
 
-        val minBuffer = AudioRecord.getMinBufferSize(
-            MICROPHONE_CAPTURE_RATE_HZ,
-            AndroidAudioFormat.CHANNEL_IN_MONO,
-            AndroidAudioFormat.ENCODING_PCM_16BIT,
-        )
-        check(minBuffer > 0) { "microphone unavailable at $MICROPHONE_CAPTURE_RATE_HZ Hz" }
-
         if (config.codec == AudioCodecKind.OPUS) {
             opusEncoder = OpusEncoder(
                 config.sampleRate,
@@ -67,21 +60,8 @@ internal class MicrophoneUplink(
 
         val captureFrameBytes =
             MICROPHONE_CAPTURE_RATE_HZ * config.frameMillis / 1000 * BYTES_PER_SAMPLE
-        val nextRecorder = AudioRecord.Builder()
-            .setAudioSource(MediaRecorder.AudioSource.MIC)
-            .setAudioFormat(
-                AndroidAudioFormat.Builder()
-                    .setEncoding(AndroidAudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(MICROPHONE_CAPTURE_RATE_HZ)
-                    .setChannelMask(AndroidAudioFormat.CHANNEL_IN_MONO)
-                    .build(),
-            )
-            .setBufferSizeInBytes(maxOf(minBuffer * 2, captureFrameBytes * 4))
-            .build()
+        val nextRecorder = openMicrophoneRecorder(captureFrameBytes * 4)
         recorder = nextRecorder
-        check(nextRecorder.state == AudioRecord.STATE_INITIALIZED) {
-            "microphone recorder failed to initialize"
-        }
 
         val nextSocket = DatagramSocket(null).apply {
             reuseAddress = true
@@ -98,7 +78,8 @@ internal class MicrophoneUplink(
             TAG,
             "microphone uplink started type=${config.audioType} codec=${config.codec} " +
                 "captureRate=$MICROPHONE_CAPTURE_RATE_HZ outputRate=${config.sampleRate} " +
-                "channels=${config.channels} frameMs=${config.frameMillis} port=${config.port}",
+                "channels=${config.channels} gain=${microphoneGainPercent}% " +
+                "frameMs=${config.frameMillis} port=${config.port}",
         )
     }
 
@@ -126,6 +107,7 @@ internal class MicrophoneUplink(
                 }
                 if (count == 0) continue
 
+                MicrophoneGain.applyPcm16InPlace(readBuffer, count, microphoneGainPercent)
                 val samples = resampler?.convert(readBuffer, 0, count) ?: readBuffer
                 val sampleBytes = if (resampler == null) count else samples.size
                 var offset = 0

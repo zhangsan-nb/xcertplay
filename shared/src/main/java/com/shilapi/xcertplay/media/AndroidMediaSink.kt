@@ -33,6 +33,7 @@ class AndroidMediaSink(
     private val videoHeight: Int = 720,
     private val preferSoftwareHevcDecoder: Boolean = false,
     private val advancedAudioChannelMapping: Boolean = false,
+    private val microphoneGainPercent: Int = MicrophoneGain.DEFAULT_PERCENT,
     onScreenStreamActiveChanged: ((Int, Boolean) -> Unit)? = null,
 ) : MediaSink {
     private val defaultSurface = surface
@@ -86,7 +87,9 @@ class AndroidMediaSink(
     }
 
     override fun onMicrophoneStarted(type: Int, config: MicrophoneConfig) {
-        val uplink = microphoneUplinks.computeIfAbsent(type) { MicrophoneUplink(context, config) }
+        val uplink = microphoneUplinks.computeIfAbsent(type) {
+            MicrophoneUplink(context, config, microphoneGainPercent)
+        }
         if (!uplink.start()) microphoneUplinks.remove(type, uplink)
     }
 

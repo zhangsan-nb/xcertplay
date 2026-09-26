@@ -37,6 +37,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Switch
@@ -65,6 +66,8 @@ import com.shilapi.xcertplay.host.R
 import com.shilapi.xcertplay.location.AndroidCarPlayLocationProvider
 import com.shilapi.xcertplay.media.AndroidMediaSink
 import com.shilapi.xcertplay.media.CarPlayTouchMapper
+import com.shilapi.xcertplay.media.MicrophoneGain
+import com.shilapi.xcertplay.media.MicrophoneLevelMonitor
 import com.shilapi.xcertplay.network.CarPlayVpnService
 import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
@@ -169,7 +172,10 @@ class CarPlayHostActivity : ComponentActivity() {
             microphoneAvailable = granted
             microphonePermissionResolved = true
             appendLog(if (granted) "Microphone permission granted" else "Microphone permission denied")
+            val startGainTest = granted && microphoneGainTestAfterPermission && menuOpen
+            microphoneGainTestAfterPermission = false
             requestStartupPrerequisites()
+            if (startGainTest) startMicrophoneGainTest()
         }
     private val locationPermission =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
@@ -234,6 +240,13 @@ class CarPlayHostActivity : ComponentActivity() {
     private var remoteMfiTokenInput: EditText? = null
     private var settingsBaseline: SettingsBaseline? = null
     private var locationReportingSwitch: Switch? = null
+    private var microphoneGainSeekBar: SeekBar? = null
+    private var microphoneGainValueView: TextView? = null
+    private var microphoneTestButton: Button? = null
+    private var microphoneLevelBar: ProgressBar? = null
+    private var microphoneLevelValueView: TextView? = null
+    private var microphoneLevelMonitor: MicrophoneLevelMonitor? = null
+    private var microphoneGainTestAfterPermission = false
     private var statusView: TextView? = null
     private var statusScrollView: ScrollView? = null
     private var stageStatusView: TextView? = null
@@ -280,6 +293,7 @@ class CarPlayHostActivity : ComponentActivity() {
     private var locationPermissionAvailable = false
     private var microphoneAvailable = false
     private var microphonePermissionResolved = false
+    @Volatile private var microphoneGainPercent = MicrophoneGain.DEFAULT_PERCENT
     private var wirelessEnabled = false
     private var mfiTarget = MfiTarget.USB_CH341
     private var mfiI2cPath = AirPlayPersistence.DEFAULT_MFI_I2C_PATH
@@ -439,6 +453,7 @@ class CarPlayHostActivity : ComponentActivity() {
         advancedAudioChannelMapping =
             advancedAudioChannelMappingSupported &&
                 AirPlayPersistence.loadAdvancedAudioChannelMapping(this)
+        microphoneGainPercent = AirPlayPersistence.loadMicrophoneGainPercent(this)
         debugLogsEnabled = AirPlayPersistence.loadDebugLogsEnabled(this)
         moreGesturesToSettings = AirPlayPersistence.loadMoreGesturesToSettings(this)
         autoStartOnBoot = AirPlayPersistence.loadAutoStartOnBoot(this)
@@ -562,6 +577,7 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        stopMicrophoneGainTest()
         // The controller, USB/iAP2 link, and VPN attachment intentionally outlive the UI.
         super.onStop()
     }
@@ -583,6 +599,7 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        stopMicrophoneGainTest()
         mainHandler.removeCallbacks(applyDisplaySize)
         mainHandler.removeCallbacks(expireOldLogLines)
         mainHandler.removeCallbacks(renderLogLines)
@@ -870,14 +887,21 @@ class CarPlayHostActivity : ComponentActivity() {
             ).apply { topMargin = dp(12) },
         )
 
+        content.addView(
+            settingsCategoryHeader("Audio"),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(36) },
+        )
+        content.addView(
+            buildMicrophoneGainSection(),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(12) },
+        )
         if (advancedAudioChannelMappingSupported) {
-            content.addView(
-                settingsCategoryHeader("Audio"),
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(36) },
-            )
             content.addView(
                 settingsSwitchRow(
                     label = "Advanced audio channel mapping",
@@ -894,7 +918,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(12) },
+                ).apply { topMargin = dp(20) },
             )
         }
 
@@ -1370,6 +1394,7 @@ class CarPlayHostActivity : ComponentActivity() {
         AirPlayPersistence.saveLocationReportingEnabled(this, locationReportingEnabled)
         AirPlayPersistence.saveAutoStartOnBoot(this, autoStartOnBoot)
         AirPlayPersistence.saveAdvancedAudioChannelMapping(this, advancedAudioChannelMapping)
+        AirPlayPersistence.saveMicrophoneGainPercent(this, microphoneGainPercent)
         AirPlayPersistence.saveDisplayScaleTenths(this, displayScaleTenths)
         AirPlayPersistence.saveFps(this, fps)
         AirPlayPersistence.saveWidthPhysicalMm(this, widthPhysicalMm)
@@ -1434,6 +1459,7 @@ class CarPlayHostActivity : ComponentActivity() {
         locationPermissionAvailable = hasFineLocationPermission()
         hotspotStatus = HotspotStatus(state = if (wirelessEnabled) "stopped" else "off")
         syncMfiSettingsControls()
+        syncMicrophoneGainControls()
         updateManualHotspotFields()
         updateAirPlayIconPreview()
         updateSafeAreaSummary()
@@ -1720,6 +1746,223 @@ class CarPlayHostActivity : ComponentActivity() {
             appendLog("Debug logs ${if (debugLogsEnabled) "enabled" else "disabled"}")
             updateDebugOverlays()
         }
+
+    private fun buildMicrophoneGainSection(): View {
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(
+            menuText("Microphone gain (0.8x–2.0x)", 20f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val gainValue = menuText(
+            microphoneGainLabel(microphoneGainPercent),
+            22f,
+            MENU_ACCENT,
+            bold = true,
+        )
+        microphoneGainValueView = gainValue
+        header.addView(
+            gainValue,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        section.addView(
+            header,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val gainSlider = SeekBar(this).apply {
+            max = (MicrophoneGain.MAX_PERCENT - MicrophoneGain.MIN_PERCENT) /
+                MicrophoneGain.STEP_PERCENT
+            progress = (microphoneGainPercent - MicrophoneGain.MIN_PERCENT) /
+                MicrophoneGain.STEP_PERCENT
+            splitTrack = false
+            progressTintList = ColorStateList.valueOf(MENU_ACCENT)
+            thumbTintList = ColorStateList.valueOf(MENU_ACCENT)
+            contentDescription = "Microphone gain"
+            setOnSeekBarChangeListener(
+                object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(
+                        seekBar: SeekBar,
+                        progress: Int,
+                        fromUser: Boolean,
+                    ) {
+                        val percent = MicrophoneGain.sanitize(
+                            MicrophoneGain.MIN_PERCENT +
+                                progress * MicrophoneGain.STEP_PERCENT,
+                        )
+                        microphoneGainPercent = percent
+                        microphoneGainValueView?.text = microphoneGainLabel(percent)
+                    }
+
+                    override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+                    override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+                },
+            )
+        }
+        microphoneGainSeekBar = gainSlider
+        controls.addView(
+            gainSlider,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val testButton = Button(this).apply {
+            text = "Test"
+            isAllCaps = false
+            textSize = 16f
+            setTextColor(MENU_BUTTON_TEXT)
+            backgroundTintList = ColorStateList.valueOf(MENU_ACCENT)
+            minWidth = dp(78)
+            contentDescription = "Test microphone level"
+            setOnClickListener {
+                if (microphoneLevelMonitor?.isRunning == true) {
+                    stopMicrophoneGainTest()
+                } else {
+                    startMicrophoneGainTest()
+                }
+            }
+        }
+        microphoneTestButton = testButton
+        controls.addView(
+            testButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { leftMargin = dp(12) },
+        )
+        section.addView(
+            controls,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(6) },
+        )
+
+        val levelHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        levelHeader.addView(
+            menuText("Peak level", 15f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val levelValue = menuText("0%", 15f, MENU_SECONDARY)
+        microphoneLevelValueView = levelValue
+        levelHeader.addView(
+            levelValue,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        section.addView(
+            levelHeader,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) },
+        )
+        val levelBar = ProgressBar(
+            this,
+            null,
+            android.R.attr.progressBarStyleHorizontal,
+        ).apply {
+            max = 100
+            progress = 0
+            progressTintList = ColorStateList.valueOf(MENU_ACCENT)
+            progressBackgroundTintList = ColorStateList.valueOf(MENU_TRACK_OFF)
+            contentDescription = "Microphone peak level"
+        }
+        microphoneLevelBar = levelBar
+        section.addView(
+            levelBar,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(14),
+            ).apply { topMargin = dp(4) },
+        )
+        return section
+    }
+
+    private fun microphoneGainLabel(percent: Int): String =
+        String.format(Locale.US, "%.1fx", MicrophoneGain.sanitize(percent) / 100.0)
+
+    private fun syncMicrophoneGainControls() {
+        microphoneGainValueView?.text = microphoneGainLabel(microphoneGainPercent)
+        microphoneGainSeekBar?.progress =
+            (microphoneGainPercent - MicrophoneGain.MIN_PERCENT) /
+                MicrophoneGain.STEP_PERCENT
+    }
+
+    private fun startMicrophoneGainTest() {
+        if (!menuOpen || handshakeResetInProgress || microphoneLevelMonitor != null) return
+        if (!microphoneAvailable) {
+            microphoneGainTestAfterPermission = true
+            microphoneLevelValueView?.text = "Permission required"
+            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+
+        lateinit var monitor: MicrophoneLevelMonitor
+        monitor = MicrophoneLevelMonitor(
+            context = applicationContext,
+            gainPercent = { microphoneGainPercent },
+            onPeakPercent = { peak ->
+                runOnUiThread {
+                    if (microphoneLevelMonitor !== monitor || !menuOpen || isDestroyed) {
+                        return@runOnUiThread
+                    }
+                    microphoneLevelBar?.progress = peak
+                    microphoneLevelValueView?.text = "$peak%"
+                }
+            },
+            onStopped = { error ->
+                runOnUiThread {
+                    if (microphoneLevelMonitor !== monitor) return@runOnUiThread
+                    microphoneLevelMonitor = null
+                    microphoneTestButton?.text = "Test"
+                    microphoneTestButton?.isEnabled = menuOpen && !handshakeResetInProgress
+                    if (error != null) {
+                        Log.e(TAG, "microphone gain test failed", error)
+                        microphoneLevelBar?.progress = 0
+                        microphoneLevelValueView?.text =
+                            error.message ?: "Test failed"
+                    }
+                }
+            },
+        )
+        microphoneLevelMonitor = monitor
+        microphoneTestButton?.text = "Stop"
+        microphoneLevelBar?.progress = 0
+        microphoneLevelValueView?.text = "Listening…"
+        if (!monitor.start()) {
+            microphoneLevelMonitor = null
+            microphoneTestButton?.text = "Test"
+        }
+    }
+
+    private fun stopMicrophoneGainTest() {
+        microphoneGainTestAfterPermission = false
+        val monitor = microphoneLevelMonitor
+        microphoneLevelMonitor = null
+        monitor?.close()
+        microphoneTestButton?.text = "Test"
+        microphoneLevelBar?.progress = 0
+        microphoneLevelValueView?.text = "0%"
+    }
 
     private fun openSystemBluetoothSettings() {
         try {
@@ -2803,6 +3046,7 @@ class CarPlayHostActivity : ComponentActivity() {
         videoHeight = videoHeight,
         preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
         advancedAudioChannelMapping = advancedAudioChannelMapping,
+        microphoneGainPercent = microphoneGainPercent,
         onScreenStreamActiveChanged = { type, active ->
             onScreenStreamStateChanged(controllerGeneration, type, active)
         },
@@ -3120,6 +3364,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun openSettingsMenu() {
         if (menuOpen || shuttingDown.get()) return
+        stopMicrophoneGainTest()
         settingsBaseline = captureSettingsBaseline()
         menuOpen = true
         handshakeResetInProgress = true
@@ -3137,6 +3382,8 @@ class CarPlayHostActivity : ComponentActivity() {
         setConnectionStage("Reconnecting after settings")
         gestureOverlay?.visibility = View.GONE
         settingsMenu?.visibility = View.VISIBLE
+        syncMicrophoneGainControls()
+        microphoneTestButton?.isEnabled = false
         updateDebugOverlays()
         clearScreenLogs()
         appendLog("Settings opened; CarPlay handshake reset")
@@ -3154,6 +3401,7 @@ class CarPlayHostActivity : ComponentActivity() {
                             return@runOnUiThread
                         }
                         handshakeResetInProgress = false
+                        microphoneTestButton?.isEnabled = menuOpen
                         if (!menuOpen && startAfterHandshakeReset) {
                             startAfterHandshakeReset = false
                             maybeStartCarPlay()
@@ -3181,6 +3429,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun finishSettingsMenu(prefix: String) {
         if (!menuOpen) return
+        stopMicrophoneGainTest()
         menuOpen = false
         settingsMenu?.visibility = View.GONE
         gestureOverlay?.visibility = View.VISIBLE
@@ -3209,6 +3458,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun shutdown(terminateProcess: Boolean, reason: String) {
         if (!shuttingDown.compareAndSet(false, true)) return
+        stopMicrophoneGainTest()
         restartGeneration += 1
         mainHandler.removeCallbacks(applyDisplaySize)
         val oldController = controller
