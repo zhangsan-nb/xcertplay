@@ -30,13 +30,6 @@
 5. Connect your MFi chip using the method you selected.
 6. Wait for the connection to complete, then enjoy.
 
-## TODO
-
-- [ ] Bluetooth activity popup
-- [x] more gesture for setting page
-- [x] debug log caused stuck bug
-- [ ] microphone passthrough bug
-
 ## Current progress
 
 It works 👍. It has been tested on car head units and phones. If you encounter
