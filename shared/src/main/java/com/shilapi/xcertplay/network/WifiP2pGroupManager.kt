@@ -18,18 +18,35 @@ import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.SocketException
 import java.net.UnknownHostException
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
+internal fun mfiCertificateWifiP2pSsid(certificate: ByteArray): String {
+    require(certificate.isNotEmpty()) { "MFi certificate must not be empty" }
+    val digest = MessageDigest.getInstance("SHA-1").digest(certificate)
+    val suffix = buildString(MFI_CERTIFICATE_SSID_SUFFIX_LENGTH) {
+        for (byte in digest.take(MFI_CERTIFICATE_SSID_SUFFIX_LENGTH / 2)) {
+            val value = byte.toInt() and 0xff
+            append(HEX_DIGITS[value ushr 4])
+            append(HEX_DIGITS[value and 0x0f])
+        }
+    }
+    return WIFI_P2P_SSID_PREFIX + suffix
+}
+
 /**
  * Creates a temporary 5 GHz Wi-Fi Direct group owner that can also be joined as a legacy AP.
  *
  * The group is deliberately not persistent. [close] removes it and releases the callback thread.
  */
-class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
+class WifiP2pGroupManager(
+    context: Context,
+    private val networkName: String,
+) : WirelessHotspotManager {
     private val appContext = context.applicationContext
     private val p2pManager = appContext.getSystemService(WifiP2pManager::class.java)
         ?: throw IllegalStateException("WifiP2pManager is unavailable")
@@ -63,7 +80,10 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
         val thread = HandlerThread("xcertplay-wifi-p2p").apply { start() }
         attempt.thread = thread
         val deadlineNanos = deadlineAfter(timeoutMillis)
-        val credentials = randomCredentials()
+        val credentials = Credentials(
+            ssid = networkName,
+            passphrase = randomToken(16),
+        )
 
         try {
             val p2pChannel = p2pManager.initialize(
@@ -366,11 +386,6 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
         }
     }
 
-    private fun randomCredentials(): Credentials = Credentials(
-        ssid = "DIRECT-xc${randomToken(4)}",
-        passphrase = randomToken(16),
-    )
-
     private fun randomToken(length: Int): String =
         buildString(length) {
             repeat(length) {
@@ -494,3 +509,7 @@ class WifiP2pGroupManager(context: Context) : WirelessHotspotManager {
             "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
     }
 }
+
+private const val WIFI_P2P_SSID_PREFIX = "DIRECT-xcertplay"
+private const val MFI_CERTIFICATE_SSID_SUFFIX_LENGTH = 4
+private const val HEX_DIGITS = "0123456789abcdef"

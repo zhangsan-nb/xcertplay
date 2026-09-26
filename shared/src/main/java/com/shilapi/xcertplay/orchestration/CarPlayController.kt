@@ -30,6 +30,7 @@ import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.iap2.session.Iap2Session
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
+import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import com.shilapi.xcertplay.mfi.RemoteMfiAuthenticationClient
 import com.shilapi.xcertplay.network.CarPlayBonjour
 import com.shilapi.xcertplay.network.CarPlayVpnService
@@ -38,6 +39,7 @@ import com.shilapi.xcertplay.network.ManualHotspotManager
 import com.shilapi.xcertplay.network.WifiP2pGroupManager
 import com.shilapi.xcertplay.network.WirelessHotspotInfo
 import com.shilapi.xcertplay.network.WirelessHotspotManager
+import com.shilapi.xcertplay.network.mfiCertificateWifiP2pSsid
 import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
 import com.shilapi.xcertplay.transport.BluetoothRfcommDuplexStream
 import com.shilapi.xcertplay.transport.Ch341DeviceMatcher
@@ -740,7 +742,7 @@ class CarPlayController(
 
             val mfi = mfiSession?.client
                 ?: throw IOException("MFi coprocessor client is unavailable")
-            val hotspotInfo = startWirelessHotspot(generation)
+            val hotspotInfo = startWirelessHotspot(generation, mfi)
             if (isStaleWirelessRun(generation)) {
                 closeWirelessStack()
                 return
@@ -1373,7 +1375,10 @@ class CarPlayController(
         type.equals("disableBluetooth", ignoreCase = true) ||
             type.equals("disable-bluetooth", ignoreCase = true)
 
-    private fun startWirelessHotspot(generation: Int): WirelessHotspotInfo {
+    private fun startWirelessHotspot(
+        generation: Int,
+        mfi: MfiAuthenticator,
+    ): WirelessHotspotInfo {
         val hotspotMode = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
             config.wirelessHotspotMode == WirelessHotspotMode.WIFI_P2P
         ) {
@@ -1382,7 +1387,12 @@ class CarPlayController(
             config.wirelessHotspotMode
         }
         val manager: WirelessHotspotManager = when (hotspotMode) {
-            WirelessHotspotMode.WIFI_P2P -> WifiP2pGroupManager(appContext)
+            WirelessHotspotMode.WIFI_P2P -> WifiP2pGroupManager(
+                context = appContext,
+                networkName = mfiCertificateWifiP2pSsid(
+                    mfi.readCertificate(),
+                ),
+            )
             WirelessHotspotMode.LOCAL_ONLY_HOTSPOT -> LocalOnlyHotspotManager(appContext)
             WirelessHotspotMode.MANUAL -> ManualHotspotManager(
                 context = appContext,
