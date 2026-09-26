@@ -12,6 +12,7 @@ import com.shilapi.xcertplay.iap2.message.Iap2NowPlayingAccumulator
 import com.shilapi.xcertplay.iap2.message.Iap2PlaybackStatus
 import com.shilapi.xcertplay.iap2.message.Iap2WirelessMessages
 import com.shilapi.xcertplay.iap2.message.Iap2WirelessSessionParameters
+import com.shilapi.xcertplay.iap2.session.Iap2FileTransferHandler
 import com.shilapi.xcertplay.iap2.trace.Iap2FrameFormatter
 import com.shilapi.xcertplay.iap2.trace.Iap2TraceDirection
 import com.shilapi.xcertplay.iap2.wire.Iap2CsmFramer
@@ -19,6 +20,7 @@ import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import com.shilapi.xcertplay.iap2.wire.Iap2Parameter
 import com.shilapi.xcertplay.iap2.wire.Iap2ParameterList
 import com.shilapi.xcertplay.iap2.wire.Iap2ProtocolException
+import com.shilapi.xcertplay.transport.Iap2LinkEngine
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -240,6 +242,40 @@ class Iap2ProtocolTest {
         )
 
         assertEquals(7, withArtwork.artworkFileTransferId)
+    }
+
+    @Test
+    fun linkAndNowPlayingSubscriptionDeclareArtworkFileTransferCapability() {
+        val sessions = Iap2LinkEngine().peerSynchronization().sessions
+        val nowPlaying = Iap2ControlMessages.subscriptions().first()
+
+        assertTrue(
+            sessions.any {
+                it.id == Iap2LinkEngine.FILE_TRANSFER_SESSION_ID && it.kind == 1 && it.version == 2
+            },
+        )
+        assertTrue(Iap2BodyReader.of(nowPlaying).group(0).has(26))
+    }
+
+    @Test
+    fun fileTransferAssemblesArtworkAndReusesCachedIdentifier() {
+        val handler = Iap2FileTransferHandler()
+        val setup = byteArrayOf(
+            7, 0x04,
+            0, 0, 0, 0, 0, 0, 0, 5,
+            0, 2,
+        )
+
+        assertArrayEquals(byteArrayOf(7, 0x01), handler.handle(setup).response)
+        assertNull(handler.handle(byteArrayOf(7, 0x80.toByte(), 1, 2)).response)
+        assertNull(handler.handle(byteArrayOf(7, 0x00, 3)).response)
+        val completed = handler.handle(byteArrayOf(7, 0x40, 4, 5))
+        assertArrayEquals(byteArrayOf(7, 0x05), completed.response)
+        assertArrayEquals(byteArrayOf(1, 2, 3, 4, 5), completed.artwork?.bytes)
+
+        val cached = handler.handle(setup) { it == 7 }
+        assertArrayEquals(byteArrayOf(7, 0x05), cached.response)
+        assertNull(cached.artwork)
     }
 
     @Test

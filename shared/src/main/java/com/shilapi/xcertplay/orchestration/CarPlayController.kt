@@ -30,6 +30,7 @@ import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.iap2.message.Iap2HidMessages
 import com.shilapi.xcertplay.iap2.message.Iap2MediaRemoteCommand
 import com.shilapi.xcertplay.iap2.message.Iap2NowPlayingAccumulator
+import com.shilapi.xcertplay.iap2.session.Iap2FileTransferReceiver
 import com.shilapi.xcertplay.iap2.session.Iap2Session
 import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import com.shilapi.xcertplay.media.CarPlayMediaSessionBridge
@@ -78,6 +79,7 @@ import java.io.Closeable
 import java.io.IOException
 import java.net.InetAddress
 import java.net.Inet6Address
+import java.util.IdentityHashMap
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -197,6 +199,7 @@ class CarPlayController(
     @Volatile private var bluetoothStream: BluetoothRfcommDuplexStream? = null
     @Volatile private var wirelessTunnelChannel: Iap2Session? = null
     @Volatile private var activeMediaRemoteSession: Iap2Session? = null
+    private val fileTransferReceivers = IdentityHashMap<Iap2Session, Iap2FileTransferReceiver>()
     @Volatile private var wirelessIdentification: Iap2IdentificationConfig? = null
     @Volatile private var wirelessAirPlayEndpoint: Iap2WirelessCarPlayEndpoint? = null
     @Volatile private var vpnService: CarPlayVpnService? = null
@@ -353,14 +356,51 @@ class CarPlayController(
     }
 
     private fun activateMediaRemote(session: Iap2Session) {
+        startFileTransferReceiver(session)
         activeMediaRemoteSession = session
         CarPlayMediaSessionBridge.setControlsAvailable(this, true)
     }
 
     private fun deactivateMediaRemote(session: Iap2Session) {
+        stopFileTransferReceiver(session)
         if (activeMediaRemoteSession !== session) return
         activeMediaRemoteSession = null
         CarPlayMediaSessionBridge.setControlsAvailable(this, false)
+    }
+
+    private fun startFileTransferReceiver(session: Iap2Session) {
+        val receiver = synchronized(fileTransferReceivers) {
+            if (fileTransferReceivers.containsKey(session)) return
+            Iap2FileTransferReceiver(
+                session = session,
+                isArtworkCached = { fileTransferId ->
+                    CarPlayMediaSessionBridge.hasArtwork(this, fileTransferId)
+                },
+                onArtwork = { artwork ->
+                    CarPlayMediaSessionBridge.publishArtwork(
+                        this,
+                        artwork.fileTransferId,
+                        artwork.bytes,
+                    )
+                },
+                onLog = ::debugLog,
+            ).also { fileTransferReceivers[session] = it }
+        }
+        receiver.start()
+    }
+
+    private fun stopFileTransferReceiver(session: Iap2Session) {
+        val receiver = synchronized(fileTransferReceivers) {
+            fileTransferReceivers.remove(session)
+        }
+        receiver?.close()
+    }
+
+    private fun stopFileTransferReceivers() {
+        val receivers = synchronized(fileTransferReceivers) {
+            fileTransferReceivers.values.toList().also { fileTransferReceivers.clear() }
+        }
+        receivers.forEach { it.close() }
     }
 
     private fun sendMediaRemoteCommand(command: Iap2MediaRemoteCommand): Boolean {
@@ -393,6 +433,7 @@ class CarPlayController(
             closed = true
         }
         closeReceivers()
+        stopFileTransferReceivers()
         availabilityPollGeneration.incrementAndGet()
         wirelessGeneration.incrementAndGet()
         permissionPollGeneration += 1

@@ -20,6 +20,12 @@ import com.shilapi.xcertplay.iap2.message.Iap2PlaybackStatus
 internal data class CarPlayMediaSnapshot(
     val nowPlaying: Iap2NowPlayingState? = null,
     val controlsAvailable: Boolean = false,
+    val artwork: CarPlayArtwork? = null,
+)
+
+internal class CarPlayArtwork(
+    val fileTransferId: Int,
+    val data: ByteArray,
 )
 
 /** Process-local seam between the iAP2 owner and the lifecycle-owned Media3 service. */
@@ -27,6 +33,7 @@ internal object CarPlayMediaSessionBridge {
     private var owner: Any? = null
     private var commandSink: ((Iap2MediaRemoteCommand) -> Boolean)? = null
     private var snapshot = CarPlayMediaSnapshot()
+    private var cachedArtwork: CarPlayArtwork? = null
     private var observer: ((CarPlayMediaSnapshot) -> Unit)? = null
 
     fun attach(
@@ -38,6 +45,7 @@ internal object CarPlayMediaSessionBridge {
             this.owner = owner
             this.commandSink = commandSink
             snapshot = CarPlayMediaSnapshot()
+            cachedArtwork = null
             observer to snapshot
         }
         update.first?.invoke(update.second)
@@ -52,6 +60,7 @@ internal object CarPlayMediaSessionBridge {
             this.owner = null
             commandSink = null
             snapshot = CarPlayMediaSnapshot()
+            cachedArtwork = null
             observer to snapshot
         }
         update.first?.invoke(update.second)
@@ -61,7 +70,32 @@ internal object CarPlayMediaSessionBridge {
     }
 
     fun publish(owner: Any, nowPlaying: Iap2NowPlayingState) = update(owner) {
-        it.copy(nowPlaying = nowPlaying)
+        if (it.nowPlaying?.artworkFileTransferId != nowPlaying.artworkFileTransferId) {
+            cachedArtwork = null
+        }
+        it.copy(
+            nowPlaying = nowPlaying,
+            artwork = cachedArtwork?.takeIf {
+                artwork -> artwork.fileTransferId == nowPlaying.artworkFileTransferId
+            },
+        )
+    }
+
+    fun publishArtwork(owner: Any, fileTransferId: Int, data: ByteArray) = update(owner) {
+        if (it.nowPlaying?.artworkFileTransferId != fileTransferId ||
+            cachedArtwork?.fileTransferId == fileTransferId
+        ) {
+            return@update it
+        }
+        val artwork = CarPlayArtwork(fileTransferId, data)
+        cachedArtwork = artwork
+        it.copy(artwork = artwork)
+    }
+
+    fun hasArtwork(owner: Any, fileTransferId: Int): Boolean = synchronized(this) {
+        this.owner === owner &&
+            snapshot.nowPlaying?.artworkFileTransferId == fileTransferId &&
+            cachedArtwork?.fileTransferId == fileTransferId
     }
 
     fun setControlsAvailable(owner: Any, available: Boolean) = update(owner) {
@@ -82,8 +116,10 @@ internal object CarPlayMediaSessionBridge {
     private inline fun update(owner: Any, transform: (CarPlayMediaSnapshot) -> CarPlayMediaSnapshot) {
         val update = synchronized(this) {
             if (this.owner !== owner) return
-            snapshot = transform(snapshot)
-            observer to snapshot
+            val next = transform(snapshot)
+            if (next == snapshot) return
+            snapshot = next
+            observer to next
         }
         update.first?.invoke(update.second)
     }
@@ -119,11 +155,28 @@ private class CarPlayRemotePlayer(
     looper: Looper,
     private val send: (Iap2MediaRemoteCommand) -> Boolean,
 ) : SimpleBasePlayer(looper) {
+    private data class MetadataKey(
+        val title: String?,
+        val artist: String?,
+        val album: String?,
+        val durationMillis: Long?,
+        val queueIndex: Long?,
+        val queueCount: Long?,
+        val artwork: CarPlayArtwork?,
+    )
+
     private var snapshot = CarPlayMediaSnapshot()
+    private var metadataKey: MetadataKey? = null
+    private var playlist: List<MediaItemData>? = null
 
     fun update(snapshot: CarPlayMediaSnapshot) {
         verifyApplicationThread()
+        if (snapshot == this.snapshot) return
         this.snapshot = snapshot
+        if (snapshot.nowPlaying == null) {
+            metadataKey = null
+            playlist = null
+        }
         invalidateState()
     }
 
@@ -151,24 +204,8 @@ private class CarPlayRemotePlayer(
                 },
             )
         if (nowPlaying != null) {
-            val metadata = nowPlaying.toMediaMetadata()
-            val mediaItem = MediaItem.Builder()
-                .setMediaId(MEDIA_ID)
-                .setMediaMetadata(metadata)
-                .build()
-            val itemData = MediaItemData.Builder(MEDIA_ID)
-                .setMediaItem(mediaItem)
-                .setMediaMetadata(metadata)
-                .setDurationUs(nowPlaying.durationMillis?.times(1_000) ?: C.TIME_UNSET)
-                .build()
             // Internal sentinels keep standard previous/next commands callable around the current item.
-            state.setPlaylist(
-                listOf(
-                    itemData.buildUpon().setUid(PREVIOUS_UID).build(),
-                    itemData,
-                    itemData.buildUpon().setUid(NEXT_UID).build(),
-                ),
-            )
+            state.setPlaylist(playlist(nowPlaying, snapshot.artwork))
                 .setCurrentMediaItemIndex(1)
                 .setContentPositionMs(
                     PositionSupplier.getExtrapolating(
@@ -206,7 +243,42 @@ private class CarPlayRemotePlayer(
         return Futures.immediateVoidFuture()
     }
 
-    private fun Iap2NowPlayingState.toMediaMetadata(): MediaMetadata =
+    private fun playlist(
+        nowPlaying: Iap2NowPlayingState,
+        artwork: CarPlayArtwork?,
+    ): List<MediaItemData> {
+        val nextKey = MetadataKey(
+            title = nowPlaying.title ?: nowPlaying.appName,
+            artist = nowPlaying.artist,
+            album = nowPlaying.album,
+            durationMillis = nowPlaying.durationMillis,
+            queueIndex = nowPlaying.queueIndex,
+            queueCount = nowPlaying.queueCount,
+            artwork = artwork,
+        )
+        playlist?.takeIf { metadataKey == nextKey }?.let { return it }
+
+        val metadata = nowPlaying.toMediaMetadata(artwork)
+        val mediaItem = MediaItem.Builder()
+            .setMediaId(MEDIA_ID)
+            .setMediaMetadata(metadata)
+            .build()
+        val itemData = MediaItemData.Builder(MEDIA_ID)
+            .setMediaItem(mediaItem)
+            .setMediaMetadata(metadata)
+            .setDurationUs(nowPlaying.durationMillis?.times(1_000) ?: C.TIME_UNSET)
+            .build()
+        return listOf(
+            itemData.buildUpon().setUid(PREVIOUS_UID).build(),
+            itemData,
+            itemData.buildUpon().setUid(NEXT_UID).build(),
+        ).also {
+            metadataKey = nextKey
+            playlist = it
+        }
+    }
+
+    private fun Iap2NowPlayingState.toMediaMetadata(artwork: CarPlayArtwork?): MediaMetadata =
         MediaMetadata.Builder()
             .setTitle(title ?: appName)
             .setArtist(artist)
@@ -215,6 +287,11 @@ private class CarPlayRemotePlayer(
             .setTrackNumber(queueIndex?.let { (it + 1).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() })
             .setTotalTrackCount(queueCount?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt())
             .setIsPlayable(true)
+            .apply {
+                if (artwork != null && artwork.data.isNotEmpty()) {
+                    setArtworkData(artwork.data, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                }
+            }
             .build()
 
     private fun Iap2NowPlayingState.currentPositionMillis(): Long {
