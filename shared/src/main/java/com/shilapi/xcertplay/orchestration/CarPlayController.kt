@@ -27,7 +27,12 @@ import com.shilapi.xcertplay.airplay.AirPlayMediaHandler
 import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.PairingStore
+import com.shilapi.xcertplay.iap2.message.Iap2HidMessages
+import com.shilapi.xcertplay.iap2.message.Iap2MediaRemoteCommand
+import com.shilapi.xcertplay.iap2.message.Iap2NowPlayingAccumulator
 import com.shilapi.xcertplay.iap2.session.Iap2Session
+import com.shilapi.xcertplay.iap2.wire.Iap2Frame
+import com.shilapi.xcertplay.media.CarPlayMediaSessionBridge
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.MfiAuthenticationClient
 import com.shilapi.xcertplay.mfi.MfiAuthenticator
@@ -191,6 +196,7 @@ class CarPlayController(
     @Volatile private var bluetoothSocket: BluetoothSocket? = null
     @Volatile private var bluetoothStream: BluetoothRfcommDuplexStream? = null
     @Volatile private var wirelessTunnelChannel: Iap2Session? = null
+    @Volatile private var activeMediaRemoteSession: Iap2Session? = null
     @Volatile private var wirelessIdentification: Iap2IdentificationConfig? = null
     @Volatile private var wirelessAirPlayEndpoint: Iap2WirelessCarPlayEndpoint? = null
     @Volatile private var vpnService: CarPlayVpnService? = null
@@ -199,6 +205,7 @@ class CarPlayController(
     private val wirelessTunnelReady = AtomicBoolean(false)
     private val wirelessActiveReported = AtomicBoolean(false)
     private val wirelessGeneration = AtomicInteger(0)
+    private val nowPlaying = Iap2NowPlayingAccumulator()
 
     private var permissionCloseable: Closeable? = null
     private var attachCloseable: Closeable? = null
@@ -298,6 +305,7 @@ class CarPlayController(
         synchronized(this) {
             if (closed) return
         }
+        CarPlayMediaSessionBridge.attach(appContext, this, ::sendMediaRemoteCommand)
         if (config.transport == CarPlayTransport.WIRED) {
             permissionCloseable = iphoneHost.registerPermissionReceiver(::onIphonePermission)
             attachCloseable = iphoneHost.registerAttachReceiver(::onIphoneAttached)
@@ -335,6 +343,50 @@ class CarPlayController(
         }
     }
 
+    private fun onIap2Incoming(frame: Iap2Frame) {
+        if (frame.messageId != NOW_PLAYING_UPDATE) return
+        try {
+            CarPlayMediaSessionBridge.publish(this, nowPlaying.update(frame))
+        } catch (error: RuntimeException) {
+            debugLog("Could not decode iAP2 NowPlayingUpdate", error)
+        }
+    }
+
+    private fun activateMediaRemote(session: Iap2Session) {
+        activeMediaRemoteSession = session
+        CarPlayMediaSessionBridge.setControlsAvailable(this, true)
+    }
+
+    private fun deactivateMediaRemote(session: Iap2Session) {
+        if (activeMediaRemoteSession !== session) return
+        activeMediaRemoteSession = null
+        CarPlayMediaSessionBridge.setControlsAvailable(this, false)
+    }
+
+    private fun sendMediaRemoteCommand(command: Iap2MediaRemoteCommand): Boolean {
+        if (closed) return false
+        val session = activeMediaRemoteSession ?: return false
+        if (session.isClosed) return false
+        return try {
+            touchExecutor.execute {
+                if (closed || activeMediaRemoteSession !== session || session.isClosed) return@execute
+                try {
+                    session.send(Iap2HidMessages.mediaReport(command), MEDIA_REMOTE_SEND_TIMEOUT_MILLIS)
+                    // Consumer Control buttons are momentary: hold the press long enough for the
+                    // phone to register the 0→1 edge before releasing, otherwise it may debounce
+                    // the button as a glitch and never change track.
+                    Thread.sleep(HID_REPORT_HOLD_MILLIS)
+                    session.send(Iap2HidMessages.releaseMediaButtons(), MEDIA_REMOTE_SEND_TIMEOUT_MILLIS)
+                } catch (error: Exception) {
+                    debugLog("Could not send iAP2 media command $command", error)
+                }
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     override fun close() {
         synchronized(this) {
             if (closed) return
@@ -344,6 +396,8 @@ class CarPlayController(
         availabilityPollGeneration.incrementAndGet()
         wirelessGeneration.incrementAndGet()
         permissionPollGeneration += 1
+        activeMediaRemoteSession = null
+        CarPlayMediaSessionBridge.detach(appContext, this)
         touchExecutor.shutdownNow()
         tunnelExecutor.shutdownNow()
         val service = vpnService
@@ -871,6 +925,9 @@ class CarPlayController(
                 endpoint = endpoint,
                 timeoutMillis = controlLoopTimeoutMillis(),
                 locationProvider = locationProvider,
+                onReady = { activateMediaRemote(channel) },
+                onStopped = { deactivateMediaRemote(channel) },
+                onIncoming = ::onIap2Incoming,
                 onProgress = ::debugLog,
             )
             if (isStaleWirelessRun(generation)) {
@@ -957,8 +1014,11 @@ class CarPlayController(
                         timeoutMillis = Iap2WirelessControlClient.NO_TIMEOUT_MILLIS,
                         locationProvider = locationProvider,
                         onReady = {
+                            activateMediaRemote(channel)
                             onWirelessTunnelReady(generation)
                         },
+                        onStopped = { deactivateMediaRemote(channel) },
+                        onIncoming = ::onIap2Incoming,
                         onProgress = { message -> debugLog("iAP tunnel $message") },
                     )
                     if (closed || generation != wirelessGeneration.get()) return@execute
@@ -1333,7 +1393,9 @@ class CarPlayController(
                 availableCurrentMilliAmps = config.availableCurrentMilliAmps,
                 timeoutMillis = controlLoopTimeoutMillis(),
                 locationProvider = locationProvider,
-                onIncoming = { },
+                onReady = { activateMediaRemote(csm) },
+                onStopped = { deactivateMediaRemote(csm) },
+                onIncoming = ::onIap2Incoming,
                 onProgress = { message -> debugLog("wired $message") },
             )
             onStatus(
@@ -1848,6 +1910,9 @@ class CarPlayController(
     }
 
     companion object {
+        private const val NOW_PLAYING_UPDATE = 0x5001
+        private const val MEDIA_REMOTE_SEND_TIMEOUT_MILLIS = 2_000L
+        private const val HID_REPORT_HOLD_MILLIS = 50L
         private const val IAP2_IPHONE_UUID = "00000000-deca-fade-deca-deafdecacafe"
         private const val HOTSPOT_START_TIMEOUT_MILLIS = 60_000L
         private const val WIFI_P2P_START_TIMEOUT_MILLIS = 20_000L

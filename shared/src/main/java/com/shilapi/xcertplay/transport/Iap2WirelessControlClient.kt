@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay.transport
 
 import com.shilapi.xcertplay.iap2.message.Iap2CarPlayMessages
+import com.shilapi.xcertplay.iap2.message.Iap2HidMessages
 import com.shilapi.xcertplay.iap2.message.Iap2WirelessMessages
 import com.shilapi.xcertplay.iap2.message.Iap2WirelessSessionParameters
 import com.shilapi.xcertplay.iap2.session.Iap2Session
@@ -26,6 +27,7 @@ class Iap2WirelessControlClient(
         timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
         locationProvider: Iap2LocationProvider? = null,
         onReady: () -> Unit = {},
+        onStopped: () -> Unit = {},
         onIncoming: (Iap2Frame) -> Unit = {},
         onProgress: (String) -> Unit = {},
     ): Iap2WirelessControlResult {
@@ -54,7 +56,6 @@ class Iap2WirelessControlClient(
         }
         stage = Iap2WirelessControlStage.SUBSCRIBED
         onProgress("iap2 subscriptions sent")
-        onReady()
 
         var forwardedFrames = 0
         var wifiConfigurationsSent = 0
@@ -65,7 +66,19 @@ class Iap2WirelessControlClient(
         var wirelessCarPlayAvailableSeen = false
         var locationActive = false
         var locationSentLogged = false
-        while (true) {
+        var hidStarted = false
+        try {
+            send(
+                Iap2HidMessages.startMediaPlaybackRemote(
+                    identification.hidVendorIdentifier,
+                    identification.hidProductIdentifier,
+                ),
+                deadlineNanos,
+            )
+            hidStarted = true
+            onProgress("iap2 tx=0x6800 start media playback remote")
+            onReady()
+            while (true) {
                 val remaining = remainingMillis(deadlineNanos)
                 if (remaining == 0L) {
                     return Iap2WirelessControlResult(
@@ -224,6 +237,15 @@ class Iap2WirelessControlClient(
                         forwardedFrames++
                     }
                 }
+            }
+        } finally {
+            locationProvider?.stop()
+            if (hidStarted && !session.isClosed) {
+                runCatching {
+                    session.send(Iap2HidMessages.stopMediaPlaybackRemote(), HID_STOP_TIMEOUT_MILLIS)
+                }
+            }
+            onStopped()
         }
     }
 
@@ -266,6 +288,7 @@ class Iap2WirelessControlClient(
         private const val WIRELESS_CARPLAY_UPDATE = 0x4e0d
         private const val DEVICE_TRANSPORT_IDENTIFIER_NOTIFICATION = 0x4e0e
         private const val LOCATION_POLL_INTERVAL_MILLIS = 1_000L
+        private const val HID_STOP_TIMEOUT_MILLIS = 1_000L
         const val NO_TIMEOUT_MILLIS = Long.MAX_VALUE
         private const val DEFAULT_TIMEOUT_MILLIS = 60_000L
         private const val MAX_TIMEOUT_MILLIS = 24 * 60 * 60 * 1_000L

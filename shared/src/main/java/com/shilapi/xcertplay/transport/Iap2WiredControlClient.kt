@@ -2,6 +2,7 @@ package com.shilapi.xcertplay.transport
 
 import com.shilapi.xcertplay.iap2.message.Iap2CarPlayMessages
 import com.shilapi.xcertplay.iap2.message.Iap2ControlMessages
+import com.shilapi.xcertplay.iap2.message.Iap2HidMessages
 import com.shilapi.xcertplay.iap2.session.Iap2Session
 import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
@@ -27,6 +28,8 @@ class Iap2WiredControlClient(
         availableCurrentMilliAmps: Int,
         timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
         locationProvider: Iap2LocationProvider? = null,
+        onReady: () -> Unit = {},
+        onStopped: () -> Unit = {},
         onIncoming: (Iap2Frame) -> Unit = {},
         onProgress: (String) -> Unit = {},
     ): Iap2WiredControlResult {
@@ -54,7 +57,18 @@ class Iap2WiredControlClient(
         var carPlayStartSessions = 0
         var locationActive = false
         var locationSentLogged = false
+        var hidStarted = false
         try {
+            send(
+                Iap2HidMessages.startMediaPlaybackRemote(
+                    identification.hidVendorIdentifier,
+                    identification.hidProductIdentifier,
+                ),
+                deadlineNanos,
+            )
+            hidStarted = true
+            onProgress("iap2 tx=0x6800 start media playback remote")
+            onReady()
             while (true) {
                 val remaining = remainingMillis(deadlineNanos)
                 if (remaining == 0L) {
@@ -128,6 +142,12 @@ class Iap2WiredControlClient(
             }
         } finally {
             locationProvider?.stop()
+            if (hidStarted && !session.isClosed) {
+                runCatching {
+                    session.send(Iap2HidMessages.stopMediaPlaybackRemote(), HID_STOP_TIMEOUT_MILLIS)
+                }
+            }
+            onStopped()
         }
     }
 
@@ -166,6 +186,7 @@ class Iap2WiredControlClient(
         private const val CARPLAY_AVAILABILITY = 0x4300
         private const val CARPLAY_START_SESSION = 0x4301
         private const val LOCATION_POLL_INTERVAL_MILLIS = 1_000L
+        private const val HID_STOP_TIMEOUT_MILLIS = 1_000L
         private const val DEFAULT_TIMEOUT_MILLIS = 60_000L
         private const val MAX_TIMEOUT_MILLIS = 24 * 60 * 60 * 1_000L
         private const val MAX_RECV_TIMEOUT_MILLIS = 5 * 60 * 1_000L
