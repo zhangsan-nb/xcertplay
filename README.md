@@ -38,8 +38,6 @@ an incompatible car head unit, please open an issue and attach your log from
 
 Adapter board: [CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
 
-Waiting for the MFI chip adapter board to arrive...
-
 ## Project structure
 
 | Path | Purpose |

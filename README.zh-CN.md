@@ -32,8 +32,6 @@
 
 转接板：[CH341-to-MFI](https://github.com/shilapi/ch341-to-mfi-chip)
 
-正在 MFI 芯片转接板到货...
-
 ## 工程结构
 
 | 路径 | 用途 |
