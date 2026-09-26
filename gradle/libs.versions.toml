@@ -31,6 +31,7 @@ androidx-app = { group = "androidx.car.app", name = "app", version.ref = "app" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 bouncycastle = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
 concentus = { group = "com.plasmoverse", name = "concentus", version.ref = "concentus" }
+androidx-media3-container = { group = "androidx.media3", name = "media3-container", version.ref = "media3" }
 androidx-media3-session = { group = "androidx.media3", name = "media3-session", version.ref = "media3" }
 
 [plugins]

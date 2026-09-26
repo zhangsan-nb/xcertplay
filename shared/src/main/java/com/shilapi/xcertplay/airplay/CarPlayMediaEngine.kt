@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap
 /** Rendering seam for the decrypted CarPlay media streams. */
 interface MediaSink {
     fun onVideoCodec(type: Int, codec: VideoCodec) {}
+    fun onVideoRecoveryHandler(type: Int, requestKeyFrame: (() -> Boolean)?) {}
     fun onVideoConfig(type: Int, codecData: ByteArray) {}
     fun onVideoFrame(type: Int, naluBytes: ByteArray) {}
     fun onScreenStreamActive(type: Int, active: Boolean) {}
@@ -70,6 +71,13 @@ class CarPlayMediaEngine(
         val streamKey = StreamKey(session, type)
         Log.i(TAG, "airplay screen key connectionID=${unsignedPlistDecimal(stream["streamConnectionID"])}")
         val screen = ScreenStream(key)
+        // The no-display-UUID forceKeyFrame command targets the primary screen.
+        // Do not accidentally restart the main screen when the alternate decoder loses sync.
+        if (type == STREAM_TYPE_MAIN_SCREEN) {
+            sink.onVideoRecoveryHandler(type) {
+                session.sendCommand(mainScreenKeyFrameCommand())
+            }
+        }
         val port = screen.listen(
             object : ScreenStream.Listener {
                 override fun onCodec(codec: VideoCodec) = sink.onVideoCodec(type, codec)
@@ -81,6 +89,7 @@ class CarPlayMediaEngine(
                         "screen stream ended type=$type reason=${cause?.message ?: "peer EOF"}",
                     )
                     if (streams.remove(streamKey, screen)) {
+                        sink.onVideoRecoveryHandler(type, null)
                         sink.onScreenStreamActive(type, false)
                     }
                     session.close()
@@ -277,7 +286,10 @@ class CarPlayMediaEngine(
         audioCaptures.remove(type)?.close()
         sink.onAudioStopped(type)
         streams.remove(StreamKey(session, type))?.close()
-        if (isScreenStreamType(type)) sink.onScreenStreamActive(type, false)
+        if (isScreenStreamType(type)) {
+            sink.onVideoRecoveryHandler(type, null)
+            sink.onScreenStreamActive(type, false)
+        }
     }
 
     override fun onSessionClosed(session: AirPlaySession) {
@@ -286,7 +298,10 @@ class CarPlayMediaEngine(
         val sessionStreams = streams.keys.filter { it.session === session }
         sessionStreams
             .filter { isScreenStreamType(it.type) }
-            .forEach { sink.onScreenStreamActive(it.type, false) }
+            .forEach {
+                sink.onVideoRecoveryHandler(it.type, null)
+                sink.onScreenStreamActive(it.type, false)
+            }
         sessionStreams.forEach { streams.remove(it)?.close() }
         sessionStreams.filter { it.type in STREAM_TYPE_MAIN_AUDIO..STREAM_TYPE_MAIN_HIGH_AUDIO }
             .forEach { sink.onAudioStopped(it.type) }
@@ -416,3 +431,7 @@ internal fun unsignedPlistInteger(value: Any?): Any = when (value) {
     is Int -> if (value < 0) BigInteger(Integer.toUnsignedString(value)) else value
     else -> value ?: 0L
 }
+
+/** AirPlaySender carEndpoint_forceKeyFrame defaults to the primary stream with empty params. */
+internal fun mainScreenKeyFrameCommand(): Map<String, Any?> =
+    linkedMapOf("type" to "forceKeyFrame", "params" to emptyMap<String, Any?>())

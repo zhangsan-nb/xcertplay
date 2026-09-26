@@ -21,7 +21,11 @@ class CarPlayMediaEngineTest {
     @Test
     fun screenStreamTeardownReportsInactive() {
         val events = mutableListOf<Pair<Int, Boolean>>()
+        val clearedRecovery = mutableListOf<Int>()
         val sink = object : MediaSink {
+            override fun onVideoRecoveryHandler(type: Int, requestKeyFrame: (() -> Boolean)?) {
+                if (requestKeyFrame == null) clearedRecovery += type
+            }
             override fun onScreenStreamActive(type: Int, active: Boolean) {
                 events += type to active
             }
@@ -37,6 +41,7 @@ class CarPlayMediaEngineTest {
         }
 
         assertEquals(listOf(110 to false), events)
+        assertEquals(listOf(110), clearedRecovery)
     }
 
     @Test
