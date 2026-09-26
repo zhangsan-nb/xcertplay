@@ -800,7 +800,6 @@ class CarPlayController(
                 ?: throw IOException("Could not bind the CarPlay AirPlay service")
             when (
                 val result = service.attachWireless(
-                    bindAddress = hostAddress,
                     config = wirelessAirPlayConfig,
                     identity = identity,
                     pairings = pairings,
@@ -816,7 +815,7 @@ class CarPlayController(
                     throw IOException(result.message)
             }
             debugLog(
-                "wireless AirPlay listener attached bind=$hostAddressText " +
+                "wireless AirPlay listener attached bind=:: advertised=$hostAddressText " +
                     "port=${airPlayConfig.port}",
             )
             if (isStaleWirelessRun(generation)) {

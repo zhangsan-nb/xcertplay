@@ -170,12 +170,16 @@ class CarPlayMediaEngine(
         )
         val tunnel = IapTunnel(
             readKey = key,
-            bindAddress = session.localAddress
-                ?: when (session.remoteAddress) {
-                    is Inet6Address -> InetAddress.getByName("::")
-                    is Inet4Address -> InetAddress.getByName("0.0.0.0")
-                    else -> InetAddress.getByName("0.0.0.0")
-                },
+            bindAddress = if (session.isWireless) {
+                InetAddress.getByName("::")
+            } else {
+                session.localAddress
+                    ?: when (session.remoteAddress) {
+                        is Inet6Address -> InetAddress.getByName("::")
+                        is Inet4Address -> InetAddress.getByName("0.0.0.0")
+                        else -> InetAddress.getByName("0.0.0.0")
+                    }
+            },
         )
         val bridge = AirPlayIapTunnelStream(session, tunnel)
         val handler = iapTunnelHandler
@@ -184,7 +188,8 @@ class CarPlayMediaEngine(
                 val boundPort = bridge.listen()
                 session.logDebug(
                     "AirPlay iAP tunnel listening address=" +
-                        "${session.localAddress?.hostAddress ?: "wildcard"} port=$boundPort",
+                        "${if (session.isWireless) "::" else session.localAddress?.hostAddress ?: "wildcard"} " +
+                        "port=$boundPort",
                 )
                 replacePendingIapTunnel(session, PendingIapTunnel(bridge, handler))
                 boundPort

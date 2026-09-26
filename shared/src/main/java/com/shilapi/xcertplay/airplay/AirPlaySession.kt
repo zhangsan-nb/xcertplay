@@ -85,6 +85,7 @@ class AirPlaySession(
 
     val host: String = socket.inetAddress?.hostAddress ?: ""
     val localAddress: InetAddress? = socket.localAddress
+    internal val isWireless: Boolean = config.wirelessAudio
     private val peerAddress: InetAddress? = socket.inetAddress
     internal val remoteAddress: InetAddress?
         get() = (socket.remoteSocketAddress as? InetSocketAddress)?.address
